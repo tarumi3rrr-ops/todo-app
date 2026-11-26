@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ToDo</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#E9E9EE">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="ToDo">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icons/icon-192.png">
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:-apple-system,'Segoe UI Variable Display','Segoe UI','Hiragino Kaku Gothic ProN','Yu Gothic UI',sans-serif;
+       background:linear-gradient(160deg,#EDEDF2 0%,#E3E4EA 100%);color:#1d1d1f;display:flex;align-items:center;justify-content:center;padding:20px}
+  .card{width:100%;max-width:420px;background:rgba(246,246,248,.97);border:1px solid rgba(0,0,0,.08);border-radius:18px;
+        box-shadow:0 18px 44px rgba(0,0,0,.13),0 3px 10px rgba(0,0,0,.07);padding:26px 22px;text-align:center}
+  .card img{width:72px;height:72px;border-radius:18px;box-shadow:0 4px 14px rgba(0,0,0,.16)}
+  h1{font-size:20px;margin:14px 0 6px;letter-spacing:-.02em}
+  p{font-size:13px;line-height:1.75;color:rgba(60,60,67,.75)}
+  .err{color:#D9730D;font-weight:600;margin-top:10px;white-space:pre-wrap;word-break:break-word}
+  input{width:100%;margin-top:14px;padding:10px 12px;font:inherit;font-size:16px;border:1px solid rgba(0,0,0,.12);border-radius:10px;background:#fff;outline:none}
+  input:focus{border-color:#0A84FF;box-shadow:0 0 0 3px rgba(10,132,255,.18)}
+  button{margin-top:12px;font:inherit;font-size:14px;font-weight:700;padding:9px 22px;border:0;border-radius:999px;background:#FF6B5E;color:#fff;cursor:pointer;
+         box-shadow:0 1px 3px rgba(255,107,94,.35)}
+  button.sub{background:rgba(0,0,0,.06);color:rgba(60,60,67,.8);box-shadow:none;margin-left:6px}
+  [hidden]{display:none !important}
+</style>
+</head>
+<body>
+<div class="card" id="splash">
+  <img src="icons/icon-192.png" alt="">
+  <h1>ToDo</h1>
+  <p id="msg">読み込み中…</p>
+  <p class="err" id="err" hidden></p>
+  <div id="retry" hidden><button onclick="location.reload()">もう一度</button><button class="sub" onclick="TodoApp.reset()">接続先を入れ直す</button></div>
+</div>
+<div class="card" id="setup" hidden>
+  <img src="icons/icon-192.png" alt="">
+  <h1>ToDo をつなぐ</h1>
+  <p>この端末で最初の1回だけ、ToDo の URL（script.google.com で始まり /exec で終わるもの）を貼ってください。この端末の中にだけ覚えます。</p>
+  <input id="url" type="url" inputmode="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/…/exec">
+  <p class="err" id="setupErr" hidden></p>
+  <button onclick="TodoApp.connect()">つなぐ</button>
+</div>
+
+<script>
+// ToDo の専用アプリの「殻」。ここには画面もデータも入っていない。
+//   ① この端末に覚えた接続先（Apps Script の /exec）から、画面（?p=ui）を取り出す（前回の画面を控えておき、起動はまず控えから）
+//   ② 画面が呼ぶ google.script.run を、接続先への POST {fn, args} に置き換える
+//   ③ 取り出した画面で、このページを書き直す
+// 接続先は、設定用リンク（このページの URL の後ろに #u=<接続先>）か、上の入力欄で、端末ごとに1回だけ入れる。
+// 入れ直す: URL の後ろに #reset を付けて開く。
+(function(){
+  'use strict';
+  var KEY = 'todo.app.exec.v1', UI_CACHE = 'todo-app-ui-v1', UI_KEY = './__ui__', CALL_TIMEOUT = 70000;
+  var HEAD = '<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#E9E9EE">'
+    + '<meta name="mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-capable" content="yes">'
+    + '<meta name="apple-mobile-web-app-title" content="ToDo"><meta name="apple-mobile-web-app-status-bar-style" content="default">'
+    + '<link rel="apple-touch-icon" href="icons/apple-touch-icon.png"><link rel="icon" type="image/png" href="icons/icon-192.png">'
+    + '<meta name="robots" content="noindex,nofollow">';
+  var $ = function(id){ return document.getElementById(id); };
+  var EXEC = '';
+
+  // 接続先の形を確かめて、ログインの要らない形（/macros/s/…/exec）にそろえる。形が違えば空
+  function norm(u){
+    u = String(u || '').trim().split('?')[0].split('#')[0];
+    var m = /^https:\/\/script\.google\.com\/(?:a\/macros\/[^\/]+|macros)\/s\/([A-Za-z0-9_-]{20,})\/exec$/.exec(u);
+    return m ? 'https://script.google.com/macros/s/' + m[1] + '/exec' : '';
+  }
+  function lsGet(k){ try { return localStorage.getItem(k) || ''; } catch(e){ return ''; } }      // 使えない設定の端末では、毎回入れてもらう
+  function lsSet(k, v){ try { localStorage.setItem(k, v); return true; } catch(e){ return false; } }
+
+  function withTimeout(ms){
+    var c = new AbortController(), t = setTimeout(function(){ c.abort(); }, ms);
+    return { signal: c.signal, done: function(){ clearTimeout(t); } };
+  }
+  function netErr(e){ return new Error('NetworkError: 接続できません（' + ((e && e.name==='AbortError') ? '時間切れ' : ((e && e.message) || e)) + '）'); }
+
+  // 画面からの呼び出し → 接続先へ POST。失敗は握りつぶさず、画面の失敗時の処理（withFailureHandler）へ渡す
+  function call(fn, args){
+    var t = withTimeout(CALL_TIMEOUT);
+    return fetch(EXEC, { method:'POST', headers:{ 'Content-Type':'text/plain;charset=utf-8' }, body: JSON.stringify({ fn: fn, args: args }),
+                         redirect:'follow', credentials:'omit', signal: t.signal })
+      .then(function(r){ t.done(); if(!r.ok) throw new Error('サーバーが ' + r.status + ' を返しました'); return r.json(); },
+            function(e){ t.done(); throw netErr(e); })
+      .then(function(j){ if(!j || !j.ok) throw new Error((j && j.error) || 'サーバーの返事を読めません'); return j.result; });
+  }
+  function runner(ok, ng){
+    return new Proxy({}, { get: function(_, prop){
+      if(prop==='withSuccessHandler') return function(h){ return runner(h, ng); };
+      if(prop==='withFailureHandler') return function(h){ return runner(ok, h); };
+      if(prop==='withUserObject') return function(){ return runner(ok, ng); };
+      return function(){
+        var args = JSON.parse(JSON.stringify(Array.prototype.slice.call(arguments)));       // Apps Script と同じく、値だけを渡す
+        call(String(prop), args).then(function(res){ if(ok) ok(res); }, function(err){ if(ng) ng(err); else console.error('ToDo: ' + prop + ' に失敗', err); });
+      };
+    }});
+  }
+
+  function fetchUi(){
+    var t = withTimeout(CALL_TIMEOUT);
+    return fetch(EXEC + '?p=ui', { credentials:'omit', redirect:'follow', signal: t.signal })
+      .then(function(r){ t.done(); if(!r.ok) throw new Error('サーバーが ' + r.status + ' を返しました'); return r.json(); },
+            function(e){ t.done(); throw netErr(e); })
+      .then(function(j){ if(!j || typeof j.html!=='string' || j.html.indexOf('<html')<0) throw new Error('画面を取り出せません（接続先の ToDo が古い版か、URL が違います）'); return { version: j.version || '', html: j.html }; });
+  }
+  // 画面の控え（次の起動をすぐ出す・圏外でも開ける）。Cache が使えなければ控えなしで動く
+  function readUi(){
+    if(!('caches' in window)) return Promise.resolve(null);
+    return caches.open(UI_CACHE).then(function(c){ return c.match(UI_KEY); }).then(function(r){ return r ? r.json() : null; })
+      .then(function(j){ return (j && j.exec===EXEC && typeof j.html==='string') ? j : null; })
+      .catch(function(){ return null; });                       // 控えが壊れていたら、取り直すだけ
+  }
+  function writeUi(ui){
+    if(!('caches' in window)) return Promise.resolve(false);
+    var body = JSON.stringify({ exec: EXEC, version: ui.version, html: ui.html, at: Date.now() });
+    return caches.open(UI_CACHE).then(function(c){ return c.put(UI_KEY, new Response(body, { headers:{ 'Content-Type':'application/json' } })); })
+      .then(function(){ return true; }, function(){ return false; });
+  }
+
+  function boot(ui){
+    window.google = { script: { run: runner(null, null) } };
+    window.__TODO_APP__ = { version: ui.version, exec: EXEC };
+    var html = ui.html.replace(/<head>/i, '<head>' + HEAD);
+    document.open(); document.write(html); document.close();   // 取り出した画面でこのページを書き直す（window はそのまま＝上の google.script.run が残る）
+  }
+  function fail(e){
+    $('msg').textContent = '読み込めませんでした';
+    $('err').textContent = String((e && e.message) || e); $('err').hidden = false; $('retry').hidden = false;
+  }
+  function start(){
+    $('setup').hidden = true; $('splash').hidden = false;
+    readUi().then(function(old){
+      if(old){
+        // 控えの画面ですぐ始め、裏で新しい画面を取り直す（変わっていたら次の起動から新しい画面）
+        fetchUi().then(function(ui){
+          if(ui.html===old.html) return;
+          writeUi(ui).then(function(saved){ if(saved && typeof window.toast==='function') window.toast('画面の新しい版（v' + ui.version + '）を取り込みました。開き直すと変わります'); });
+        }, function(){ /* 圏外など。控えの画面で動いているので、何もしない */ });
+        boot(old);
+        return;
+      }
+      return fetchUi().then(function(ui){ return writeUi(ui).then(function(){ boot(ui); }); });
+    }).catch(fail);
+  }
+
+  window.TodoApp = {
+    connect: function(){
+      var u = norm($('url').value);
+      if(!u){ $('setupErr').textContent = 'URL の形が違います（https://script.google.com/…/exec）'; $('setupErr').hidden = false; return; }
+      EXEC = u;
+      if(!lsSet(KEY, u)){ $('setupErr').textContent = 'この端末は覚えておけない設定です（プライベートブラウズなど）。今回だけつなぎます'; $('setupErr').hidden = false; }
+      start();
+    },
+    reset: function(){
+      try { localStorage.removeItem(KEY); } catch(e){ /* 覚えていないだけなので、そのまま入力へ */ }
+      if('caches' in window) caches.delete(UI_CACHE);
+      EXEC = ''; $('splash').hidden = true; $('setup').hidden = false; $('url').focus();
+    }
+  };
+
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(e){ console.warn('ToDo: 起動時の控え（service worker）を入れられません', e); });
+
+  // 開いたまま設定用リンク（#u=…）や #reset に移ったときは、ページを読み直してそれを効かせる
+  window.addEventListener('hashchange', function(){ if(/[#&]u=|^#reset\b/.test(location.hash || '')) location.reload(); });
+
+  var h = location.hash || '';
+  if(/^#reset\b/.test(h)){ history.replaceState(null, '', location.pathname); window.TodoApp.reset(); return; }
+  var m = /[#&]u=([^&]+)/.exec(h);
+  if(m){
+    var given = '';
+    try { given = norm(decodeURIComponent(m[1])); } catch(e){ given = ''; }
+    history.replaceState(null, '', location.pathname);          // 接続先を URL に残さない
+    if(given){ EXEC = given; lsSet(KEY, given); }
+  }
+  if(!EXEC) EXEC = norm(lsGet(KEY));
+  if(!EXEC){ $('splash').hidden = true; $('setup').hidden = false; return; }
+  start();
+})();
+</script>
+</body>
+</html>
